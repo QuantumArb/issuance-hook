@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {BaseHook} from "v4-periphery/src/base/hooks/BaseHook.sol";
+import {BaseHook, IHooks} from "v4-periphery/src/base/hooks/BaseHook.sol";
 
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
@@ -15,7 +15,8 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 
-abstract contract InstanceIssuanceHook is BaseHook {
+
+abstract contract InstantIssuanceHook is BaseHook {
     using PoolIdLibrary for PoolKey;
     using CurrencySettler for Currency;
     using SafeCast for uint256;
@@ -31,7 +32,7 @@ abstract contract InstanceIssuanceHook is BaseHook {
         quoter = _quoter;
     }
 
-    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+    function getHookPermissions() public pure override(BaseHook) returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
@@ -39,7 +40,7 @@ abstract contract InstanceIssuanceHook is BaseHook {
             afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
-            beforeSwap: false,
+            beforeSwap: true,
             afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
@@ -65,7 +66,7 @@ abstract contract InstanceIssuanceHook is BaseHook {
         (uint256 amountIn, uint256 amountOut) = _previewSwap(key, params, hookData);
         
         // Preview the issuance
-        uint256 amountIssued = _previewIssuanceExactInput(amountOut);
+        uint256 amountIssued = previewIssuanceExactInput(amountOut);
 
         // If issuance gives a better price than swapping, issue the tokens
         if (amountIssued > amountOut) {
@@ -82,6 +83,14 @@ abstract contract InstanceIssuanceHook is BaseHook {
             return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
     }
+
+    // -----------------------------------------------
+    // Issuance Functions
+    // -----------------------------------------------
+
+    function previewIssuanceExactInput(uint256 amountIn) public virtual returns(uint256 amountOut);
+    
+    function _issueTokens(uint256 amountIn) internal virtual;
 
     // -----------------------------------------------
     // Internal Pool Swap Preview Functions
@@ -103,7 +112,7 @@ abstract contract InstanceIssuanceHook is BaseHook {
     }
 
 
-    function _previewPoolExactInput(PoolKey memory key, bool zeroForOne, uint128 amountIn, bytes memory hookData) internal returns(uint256 amountOut) {
+    function _previewPoolExactInput(PoolKey memory key, bool zeroForOne, uint128 amountIn, bytes memory hookData) internal virtual returns(uint256 amountOut) {
         IV4Quoter.QuoteExactSingleParams memory params = IV4Quoter.QuoteExactSingleParams({
             poolKey: key,
             zeroForOne: zeroForOne,
@@ -113,7 +122,7 @@ abstract contract InstanceIssuanceHook is BaseHook {
         (amountOut, ) = quoter.quoteExactInputSingle(params);
     }
 
-    function _previewPoolExactOutput(PoolKey memory key, bool zeroForOne, uint128 amountOut, bytes memory hookData) internal returns(uint256 amountIn) {
+    function _previewPoolExactOutput(PoolKey memory key, bool zeroForOne, uint128 amountOut, bytes memory hookData) internal virtual returns(uint256 amountIn) {
         IV4Quoter.QuoteExactSingleParams memory params = IV4Quoter.QuoteExactSingleParams({
             poolKey: key,
             zeroForOne: zeroForOne,
@@ -123,15 +132,6 @@ abstract contract InstanceIssuanceHook is BaseHook {
         (amountIn, ) = quoter.quoteExactInputSingle(params);
     }
 
-    // -----------------------------------------------
-    // Internal Pool Swap Preview Functions
-    // -----------------------------------------------
-
-    function _previewIssuanceExactInput(uint256 amountIn) internal virtual returns(uint256 amountOut) {
-        return issuance.calculateMint(amountIn);
-    }
-    
-    function _issueTokens(uint256 amountIn) internal virtual;
 
     // -----------------------------------------------
     // Internal Utility Functions
