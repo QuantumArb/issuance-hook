@@ -13,8 +13,9 @@ contract MockIssuance {
     }
 
     function mint(uint256 amount) external {
+        paymentToken.transferFrom(msg.sender, address(this), amount);
         uint256 amountToIssue = calculateMint(amount);
-        paymentToken.transferFrom(msg.sender, address(this), amountToIssue);
+        issuanceToken.transfer(msg.sender, amountToIssue);
     }
 
     function calculateMint(uint256 amount) public pure returns (uint256) {
