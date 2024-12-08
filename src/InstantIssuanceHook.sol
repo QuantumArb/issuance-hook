@@ -4,7 +4,6 @@ pragma solidity ^0.8.24;
 import {BaseHook, IHooks} from "v4-periphery/src/base/hooks/BaseHook.sol";
 
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
-import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/interfaces/IERC20.sol";
 
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
@@ -122,6 +121,8 @@ abstract contract InstantIssuanceHook is BaseHook {
 
     function _getPoolRate(PoolKey memory key) internal view returns(uint256 price) {
         (uint160 sqrtPriceX96, , ,) = StateLibrary.getSlot0(poolManager, PoolIdLibrary.toId(key));
+
+        return uint256(sqrtPriceX96);
     }
 
     // -----------------------------------------------

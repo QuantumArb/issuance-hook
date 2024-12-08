@@ -2,9 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {BaseHook, IHooks} from "v4-periphery/src/base/hooks/BaseHook.sol";
+import {ERC4626, ERC20} from "lib/v4-core/lib/solmate/src/mixins/ERC4626.sol";
+import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
 
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
-import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/interfaces/IERC20.sol";
 
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
@@ -17,22 +18,44 @@ import {BeforeSwapDelta, BeforeSwapDeltaLibrary, toBeforeSwapDelta} from "v4-cor
 import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
-contract DelayedIssuanceHook is BaseHook {
+import {AggregatorV3Interface} from "chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+
+contract DelayedIssuanceHook is BaseHook, ERC4626, AccessControl {
     using PoolIdLibrary for PoolKey;
     using CurrencySettler for Currency;
     using SafeCast for uint256;
 
+    bytes32 public constant ISSUER_ROLE = keccak256("ISSUER_ROLE");
+
     uint256 constant X192_PRECISION = 2**192;
+
+    AggregatorV3Interface public immutable paymentTokenFeed;
+    AggregatorV3Interface public immutable issuanceTokenFeed;
 
     Currency public immutable paymentToken;
     Currency public immutable issuanceToken;
 
-    constructor(IPoolManager _poolManager, Currency _paymentToken, Currency _issuanceToken) BaseHook(_poolManager) {
+    uint256 public issuanceSpread; // Issuance spread in bps
+    uint256 public vaultInterestRate; // Interest rate in bps, per trade
+
+    uint256 public accruedDebt;
+    uint256 public accruedRewards;
+
+    constructor(IPoolManager _poolManager, Currency _paymentToken, Currency _issuanceToken, AggregatorV3Interface _paymentTokenFeed, AggregatorV3Interface _issuanceTokenFeed, uint256 _issuanceSpread, uint256 _vaultInterestRate) BaseHook(_poolManager) ERC4626(ERC20(Currency.unwrap(_issuanceToken)), "Delayed Issuance Vault Shares", "DIT") {
         paymentToken = _paymentToken;
         issuanceToken = _issuanceToken;
 
+        paymentTokenFeed = _paymentTokenFeed;
+        issuanceTokenFeed = _issuanceTokenFeed;
+
+        issuanceSpread = _issuanceSpread;
+        vaultInterestRate = _vaultInterestRate;
+
         // Approve the issuance token
         IERC20(Currency.unwrap(issuanceToken)).approve(address(poolManager), type(uint256).max);
+
+        // Grant default admin role to the deployer
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
 
     function getHookPermissions() public pure override(BaseHook) returns (Hooks.Permissions memory) {
@@ -66,7 +89,7 @@ contract DelayedIssuanceHook is BaseHook {
         if (!_validateTokens(inputCurrency, outputCurrency)) return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
 
         // NOTE: We are working on a much more accurate way to do this, which would also allow partial issuance and swap
-        // Get the pool rate
+        // Get the current pool rate
         uint256 poolRateX192 = _getPoolRate(key) ** 2;
 
         // Get the issuance rate and convert to X192
@@ -90,6 +113,9 @@ contract DelayedIssuanceHook is BaseHook {
             // Take the tokens from the pool manager
             inputCurrency.take(poolManager, address(this), amountIn, false);
 
+            // Add the accrued debt
+            accruedDebt += amountOut;
+
             // Take tokens from the hook's vault, this will be replenished by the Issuer + interest.
             outputCurrency.settle(poolManager, address(this), amountOut, false);
 
@@ -99,12 +125,41 @@ contract DelayedIssuanceHook is BaseHook {
             return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
     }
+    // -------------------------------------------------------------
+    // Staking Vault Functions
+    // -------------------------------------------------------------
+    function repayDebt(uint256 amount) external onlyRole(ISSUER_ROLE) {
+        uint256 interest = (amount * vaultInterestRate) / 10_000;
+        uint256 totalRepay = amount + interest;
+        IERC20(Currency.unwrap(issuanceToken)).transferFrom(msg.sender, address(this), totalRepay);
+
+        accruedRewards += interest;
+        accruedDebt -= amount;
+    }
+
+    function totalAssets() public override view returns(uint256) {
+        uint256 balance = IERC20(Currency.unwrap(issuanceToken)).balanceOf(address(this));
+        return balance + accruedDebt;
+    }
 
     // -------------------------------------------------------------
     // Issuance Functions - To be overridden by the implementation
     // -------------------------------------------------------------
     
-    function _getIssuanceRate() internal view virtual returns(uint256 rate) {}
+    function _getIssuanceRate() internal view virtual returns(uint256 rate) {
+        // Get the current price of the payment token
+        uint256 paymentTokenPrice = _getChainlinkPrice(paymentTokenFeed);
+
+        // Get the current price of the issuance token
+        uint256 issuanceTokenPrice = _getChainlinkPrice(issuanceTokenFeed);
+
+        // Calculate the rate
+        rate = issuanceTokenPrice / paymentTokenPrice;
+
+        uint256 spread = (rate * issuanceSpread) / 10_000;
+
+        rate += spread;
+    }
 
     function _calculateAmountOut(uint256 rate, uint256 amountIn) internal view virtual returns(uint256 amountOut) {
         return amountIn * rate / 1e18;
@@ -113,8 +168,6 @@ contract DelayedIssuanceHook is BaseHook {
     function _calculateAmountIn(uint256 rate, uint256 amountOut) internal view virtual returns(uint256 amountIn) {
         return amountOut * 1e18 / rate;
     }
-
-    function _issueTokens(uint256 amountIn) internal virtual;
 
     // -----------------------------------------------
     // Internal Pool Swap Preview Functions
@@ -137,5 +190,10 @@ contract DelayedIssuanceHook is BaseHook {
 
     function _validateTokens(Currency inputCurrency, Currency outputCurrency) internal view returns(bool) {
         return inputCurrency == paymentToken && outputCurrency == issuanceToken;
+    }
+
+    function _getChainlinkPrice(AggregatorV3Interface priceFeed) internal view returns(uint256 price) {
+        (, , price, , ) = priceFeed.latestRoundData();
+        return price;
     }
 }
