@@ -18,7 +18,6 @@ contract MockInstantIssuanceHook is InstantIssuanceHook, Test {
     }
     
     function _issueTokens(uint256 amountIn) internal override {
-        MockERC20(Currency.unwrap(paymentToken)).balanceOf(address(this));
         MockERC20(Currency.unwrap(paymentToken)).approve(address(issuance), amountIn);
         issuance.mint(amountIn);
     }

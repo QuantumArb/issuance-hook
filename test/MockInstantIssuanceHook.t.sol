@@ -88,7 +88,7 @@ contract MockInstantIssuanceHookTest is Test, Fixtures {
         );
     }
 
-    function test_swap_hook_triggered() public {
+    function test_swap_hook_instant_issuance_triggered() public {
         IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
             zeroForOne: true,
             amountSpecified: int256(-(10 ether)),

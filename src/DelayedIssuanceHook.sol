@@ -39,6 +39,7 @@ contract DelayedIssuanceHook is BaseHook, ERC4626, AccessControl {
     uint256 public vaultInterestRate; // Interest rate in bps, per trade
 
     uint256 public accruedDebt;
+    uint256 public accruedPaymentToken;
     uint256 public accruedRewards;
 
     constructor(IPoolManager _poolManager, Currency _paymentToken, Currency _issuanceToken, AggregatorV3Interface _paymentTokenFeed, AggregatorV3Interface _issuanceTokenFeed, uint256 _issuanceSpread, uint256 _vaultInterestRate) BaseHook(_poolManager) ERC4626(ERC20(Currency.unwrap(_issuanceToken)), "Delayed Issuance Vault Shares", "DIT") {
@@ -113,8 +114,9 @@ contract DelayedIssuanceHook is BaseHook, ERC4626, AccessControl {
             // Take the tokens from the pool manager
             inputCurrency.take(poolManager, address(this), amountIn, false);
 
-            // Add the accrued debt
+            // Add the accrued debt and the payment tokens for the issuer to take
             accruedDebt += amountOut;
+            accruedPaymentToken += amountIn;
 
             // Take tokens from the hook's vault, this will be replenished by the Issuer + interest.
             outputCurrency.settle(poolManager, address(this), amountOut, false);
@@ -128,13 +130,20 @@ contract DelayedIssuanceHook is BaseHook, ERC4626, AccessControl {
     // -------------------------------------------------------------
     // Staking Vault Functions
     // -------------------------------------------------------------
-    function repayDebt(uint256 amount) external onlyRole(ISSUER_ROLE) {
-        uint256 interest = (amount * vaultInterestRate) / 10_000;
-        uint256 totalRepay = amount + interest;
+    function repayDebt(uint256 amountOfDebt) external onlyRole(ISSUER_ROLE) {
+        if (amountOfDebt > accruedDebt) amountOfDebt = accruedDebt;
+
+        uint256 factor = (accruedPaymentToken * 1e18) / accruedDebt;
+
+        uint256 interest = (amountOfDebt * vaultInterestRate) / 10_000;
+        uint256 totalRepay = amountOfDebt + interest;
         IERC20(Currency.unwrap(issuanceToken)).transferFrom(msg.sender, address(this), totalRepay);
 
         accruedRewards += interest;
-        accruedDebt -= amount;
+        accruedDebt -= amountOfDebt;
+        
+        uint256 paymentTokenAmount = (amountOfDebt * factor) / 1e18;
+        IERC20(Currency.unwrap(paymentToken)).transfer(msg.sender, paymentTokenAmount);
     }
 
     function totalAssets() public override view returns(uint256) {
@@ -154,7 +163,7 @@ contract DelayedIssuanceHook is BaseHook, ERC4626, AccessControl {
         uint256 issuanceTokenPrice = _getChainlinkPrice(issuanceTokenFeed);
 
         // Calculate the rate
-        rate = issuanceTokenPrice / paymentTokenPrice;
+        rate = (issuanceTokenPrice * 1e18) / paymentTokenPrice;
 
         uint256 spread = (rate * issuanceSpread) / 10_000;
 

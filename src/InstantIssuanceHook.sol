@@ -70,10 +70,10 @@ abstract contract InstantIssuanceHook is BaseHook {
 
         // Get the issuance rate and convert to X192
         uint256 issuanceRate = _getIssuanceRate();
-        uint256 issuanceRateX192 = issuanceRate * uint256(X192_PRECISION / 1e18);
+        uint256 issuanceRateX192 = issuanceRate / uint256(X192_PRECISION / 1e18);
 
-        if (issuanceRateX192 > poolRateX192) {
-            // If the issuance rate is greater than the pool rate, we issue
+        if (issuanceRateX192 < poolRateX192) {
+            // If the issuance rate is lower than the pool rate, we issue
             uint256 amountIn;
             uint256 amountOut;
             if (params.amountSpecified < 0) {
@@ -89,7 +89,6 @@ abstract contract InstantIssuanceHook is BaseHook {
             // Issue the tokens
             inputCurrency.take(poolManager, address(this), amountIn, false);
             _issueTokens(amountIn);
-            IERC20(Currency.unwrap(outputCurrency)).balanceOf(address(this));
             outputCurrency.settle(poolManager, address(this), amountOut, false);
 
             return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(amountIn.toInt128(), -amountOut.toInt128()), 0);
